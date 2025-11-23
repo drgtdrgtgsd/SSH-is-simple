@@ -7,75 +7,14 @@ import sys
 import re
 import select
 import time
+import os
+import stat
+import subprocess
+import sys
+from datetime import datetime
+from tkinter import filedialog
 
-class TerminalWindow(tk.Toplevel):
-    def __init__(self, master, client, channel, title="SSH Terminal", bg_color="black", fg_color="white"):
-        super().__init__(master)
-        self.title(title)
-        self.geometry("800x600")
-        self.client = client
-        self.channel = channel
-        self.running = True
-        self.bg_color = bg_color
-        self.fg_color = fg_color
 
-        # Text area for terminal output
-        self.text_area = scrolledtext.ScrolledText(self, state='disabled', bg=self.bg_color, fg=self.fg_color, font=("Consolas", 10), insertbackground=self.fg_color)
-        self.text_area.pack(expand=True, fill='both')
-        
-        # Bind key events
-        self.text_area.bind("<Key>", self.on_key)
-        self.text_area.bind("<Return>", self.on_enter)
-        self.text_area.bind("<BackSpace>", self.on_backspace)
-        
-        # Start receiving thread
-        self.recv_thread = threading.Thread(target=self.receive_data, daemon=True)
-        self.recv_thread.start()
-
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    def on_key(self, event):
-        if len(event.char) > 0 and ord(event.char) >= 32:
-            self.channel.send(event.char)
-            return "break"
-
-    def on_enter(self, event):
-        self.channel.send("\n")
-        return "break"
-
-    def on_backspace(self, event):
-        self.channel.send("\x7f")
-        return "break"
-
-    def receive_data(self):
-        while self.running:
-            if self.channel.recv_ready():
-                try:
-                    data = self.channel.recv(1024).decode('utf-8', errors='ignore')
-                    if not data:
-                        break
-                    clean_data = re.sub(r'\x1b\[[0-9;]*[mGKH]', '', data) 
-                    
-                    # Schedule GUI update on main thread
-                    self.after(0, self.update_terminal, clean_data)
-                except Exception:
-                    break
-            time.sleep(0.01)
-
-    def update_terminal(self, data):
-        self.text_area.config(state='normal')
-        self.text_area.insert(tk.END, data)
-        self.text_area.see(tk.END)
-        self.text_area.config(state='disabled')
-
-    def on_close(self):
-        self.running = False
-        try:
-            self.channel.close()
-            self.client.close()
-        except:
-            pass
-        self.destroy()
 
 class PortForwarder(threading.Thread):
     def __init__(self, local_port, remote_host, remote_port, transport):
@@ -218,7 +157,7 @@ class SSHGui:
         header_frame = ttk.Frame(self.main_frame)
         header_frame.pack(fill=tk.X, pady=(0, 20))
         
-        self.title_label = ttk.Label(header_frame, text="SSH 连接工具 (Native)", font=("Segoe UI", 16, "bold"))
+        self.title_label = ttk.Label(header_frame, text="SSH simple", font=("Segoe UI", 16, "bold"))
         self.title_label.pack(side=tk.LEFT)
         
         self.theme_btn = self.create_hover_button(header_frame, text="☀/🌙", width=5, command=self.toggle_theme)
@@ -460,18 +399,12 @@ class SSHGui:
                 pf = PortForwarder(cfg['local'], cfg['remote_host'], cfg['remote_port'], transport)
                 pf.start()
 
-            channel = client.invoke_shell()
-            
             # Pass theme colors to terminal
             t = self.themes["dark"] if self.is_dark else self.themes["light"]
-            
+
             def launch_windows():
-                # Open Terminal
-                TerminalWindow(self.root, client, channel, 
-                             title=f"SSH: {user}@{ip}",
-                             bg_color=t["bg"], fg_color=t["fg"])
-                # Open Toolbox
-                SSHToolbox(self.root, t)
+                # Open Toolbox only
+                SSHToolbox(self.root, t, client, user, ip, port, password)
 
             self.root.after(0, launch_windows)
             
@@ -479,23 +412,303 @@ class SSHGui:
             error_msg = str(e)
             self.root.after(0, lambda: messagebox.showerror("连接失败", error_msg))
 
-class SSHToolbox(tk.Toplevel):
-    def __init__(self, master, theme):
+            self.root.after(0, lambda: messagebox.showerror("连接失败", error_msg))
+
+class TextEditorWindow(tk.Toplevel):
+    def __init__(self, master, sftp, remote_path, theme):
         super().__init__(master)
-        self.title("SSH 工具箱")
-        self.geometry("300x400")
-        self.resizable(False, False)
+        self.title(f"编辑: {remote_path}")
+        self.geometry("800x600")
+        self.sftp = sftp
+        self.remote_path = remote_path
+        self.theme = theme
+        self.configure(bg=theme["bg"])
+
+        # Toolbar
+        toolbar = ttk.Frame(self)
+        toolbar.pack(fill=tk.X, padx=5, pady=5)
+        
+        HoverButton(toolbar, text="💾 保存", command=self.save_file,
+                   bg=theme["btn_bg"], fg=theme["btn_fg"], hover_bg=theme["btn_hover"]).pack(side=tk.LEFT, padx=2)
+        HoverButton(toolbar, text="🔄 重载", command=self.load_file,
+                   bg=theme["btn_bg"], fg=theme["btn_fg"], hover_bg=theme["btn_hover"]).pack(side=tk.LEFT, padx=2)
+
+        # Text Area
+        self.text_area = scrolledtext.ScrolledText(self, undo=True, font=("Consolas", 11))
+        self.text_area.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        self.load_file()
+
+    def load_file(self):
+        try:
+            with self.sftp.open(self.remote_path, 'r') as f:
+                content = f.read().decode('utf-8')
+            self.text_area.delete('1.0', tk.END)
+            self.text_area.insert('1.0', content)
+        except Exception as e:
+            messagebox.showerror("错误", f"无法读取文件: {str(e)}")
+
+    def save_file(self):
+        try:
+            content = self.text_area.get('1.0', tk.END)
+            with self.sftp.open(self.remote_path, 'w') as f:
+                f.write(content.encode('utf-8'))
+            messagebox.showinfo("成功", "文件已保存")
+        except Exception as e:
+            messagebox.showerror("错误", f"无法保存文件: {str(e)}")
+
+class FileManagerWindow(tk.Toplevel):
+    def __init__(self, master, client, theme):
+        super().__init__(master)
+        self.title("文件管理")
+        self.geometry("900x600")
+        self.client = client
         self.theme = theme
         self.configure(bg=theme["bg"])
         
-        # Title
-        ttk.Label(self, text="工具箱", font=("Segoe UI", 14, "bold"), 
-                 background=theme["bg"], foreground=theme["fg"]).pack(pady=20)
+        self.sftp = self.client.open_sftp()
+        self.current_path = "/"
+        self.clipboard = None # {path, op='cut'|'copy'}
+
+        # Toolbar
+        toolbar = ttk.Frame(self)
+        toolbar.pack(fill=tk.X, padx=5, pady=5)
+        
+        HoverButton(toolbar, text="⬆ 上一级", command=self.go_up, width=8,
+                   bg=theme["btn_bg"], fg=theme["btn_fg"], hover_bg=theme["btn_hover"]).pack(side=tk.LEFT, padx=2)
+        HoverButton(toolbar, text="🏠 根目录", command=lambda: self.navigate("/"), width=8,
+                   bg=theme["btn_bg"], fg=theme["btn_fg"], hover_bg=theme["btn_hover"]).pack(side=tk.LEFT, padx=2)
+        HoverButton(toolbar, text="🔄 刷新", command=self.refresh, width=6,
+                   bg=theme["btn_bg"], fg=theme["btn_fg"], hover_bg=theme["btn_hover"]).pack(side=tk.LEFT, padx=2)
+        
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=5, fill=tk.Y)
+        
+        HoverButton(toolbar, text="📤 上传", command=self.upload_file, width=6,
+                   bg=theme["btn_bg"], fg=theme["btn_fg"], hover_bg=theme["btn_hover"]).pack(side=tk.LEFT, padx=2)
+        HoverButton(toolbar, text="📁 新建文件夹", command=self.new_folder, width=10,
+                   bg=theme["btn_bg"], fg=theme["btn_fg"], hover_bg=theme["btn_hover"]).pack(side=tk.LEFT, padx=2)
+
+        # Address Bar
+        self.addr_var = tk.StringVar()
+        addr_entry = tk.Entry(toolbar, textvariable=self.addr_var, font=("Segoe UI", 9))
+        addr_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        addr_entry.bind("<Return>", lambda e: self.navigate(self.addr_var.get()))
+
+        # File List
+        columns = ("name", "size", "type", "mtime")
+        self.tree = ttk.Treeview(self, columns=columns, show="headings", selectmode="browse")
+        self.tree.heading("name", text="名称")
+        self.tree.heading("size", text="大小")
+        self.tree.heading("type", text="类型")
+        self.tree.heading("mtime", text="修改时间")
+        
+        self.tree.column("name", width=300)
+        self.tree.column("size", width=100)
+        self.tree.column("type", width=80)
+        self.tree.column("mtime", width=150)
+        
+        self.tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Scrollbar
+        sb = ttk.Scrollbar(self.tree, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+
+        # Bindings
+        self.tree.bind("<Double-1>", self.on_double_click)
+        self.tree.bind("<Button-3>", self.show_context_menu)
+
+        # Context Menu
+        self.menu = tk.Menu(self, tearoff=0)
+        self.menu.add_command(label="打开/进入", command=self.on_double_click)
+        self.menu.add_command(label="编辑 (文本)", command=self.edit_file)
+        self.menu.add_separator()
+        self.menu.add_command(label="下载", command=self.download_file)
+        self.menu.add_separator()
+        self.menu.add_command(label="复制", command=lambda: self.set_clipboard('copy'))
+        self.menu.add_command(label="剪切", command=lambda: self.set_clipboard('cut'))
+        self.menu.add_command(label="粘贴", command=self.paste_file)
+        self.menu.add_separator()
+        self.menu.add_command(label="重命名", command=self.rename_item)
+        self.menu.add_command(label="删除", command=self.delete_item)
+
+        self.navigate("/")
+
+    def navigate(self, path):
+        try:
+            self.sftp.chdir(path)
+            self.current_path = self.sftp.getcwd()
+            self.addr_var.set(self.current_path)
+            self.refresh()
+        except Exception as e:
+            messagebox.showerror("错误", f"无法进入目录: {str(e)}")
+
+    def refresh(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        
+        try:
+            files = self.sftp.listdir_attr(self.current_path)
+            # Sort: folders first, then files
+            files.sort(key=lambda x: (not stat.S_ISDIR(x.st_mode), x.filename))
+            
+            for f in files:
+                is_dir = stat.S_ISDIR(f.st_mode)
+                ftype = "文件夹" if is_dir else "文件"
+                size = f"{f.st_size / 1024:.1f} KB" if not is_dir else ""
+                mtime = datetime.fromtimestamp(f.st_mtime).strftime('%Y-%m-%d %H:%M')
+                
+                icon = "📁 " if is_dir else "📄 "
+                self.tree.insert("", "end", iid=f.filename, values=(icon + f.filename, size, ftype, mtime))
+        except Exception as e:
+            messagebox.showerror("错误", f"刷新失败: {str(e)}")
+
+    def go_up(self):
+        parent = os.path.dirname(self.current_path)
+        if parent == self.current_path: return # Root
+        self.navigate(parent)
+
+    def on_double_click(self, event=None):
+        sel = self.tree.selection()
+        if not sel: return
+        name = sel[0]
+        # Remove icon
+        # Actually iid is just filename based on insert above
+        
+        try:
+            attr = self.sftp.stat(self.current_path + "/" + name)
+            if stat.S_ISDIR(attr.st_mode):
+                self.navigate(self.current_path + "/" + name)
+            else:
+                self.edit_file()
+        except Exception as e:
+            messagebox.showerror("错误", str(e))
+
+    def show_context_menu(self, event):
+        item = self.tree.identify_row(event.y)
+        if item:
+            self.tree.selection_set(item)
+            self.menu.post(event.x_root, event.y_root)
+
+    def upload_file(self):
+        local_path = filedialog.askopenfilename()
+        if local_path:
+            filename = os.path.basename(local_path)
+            remote_path = self.current_path + "/" + filename
+            try:
+                self.sftp.put(local_path, remote_path)
+                messagebox.showinfo("成功", "上传完成")
+                self.refresh()
+            except Exception as e:
+                messagebox.showerror("错误", f"上传失败: {str(e)}")
+
+    def download_file(self):
+        sel = self.tree.selection()
+        if not sel: return
+        filename = sel[0]
+        remote_path = self.current_path + "/" + filename
+        
+        local_path = filedialog.asksaveasfilename(initialfile=filename)
+        if local_path:
+            try:
+                self.sftp.get(remote_path, local_path)
+                messagebox.showinfo("成功", "下载完成")
+            except Exception as e:
+                messagebox.showerror("错误", f"下载失败: {str(e)}")
+
+    def edit_file(self):
+        sel = self.tree.selection()
+        if not sel: return
+        filename = sel[0]
+        remote_path = self.current_path + "/" + filename
+        
+        # Simple check if binary
+        # For now assume text
+        TextEditorWindow(self, self.sftp, remote_path, self.theme)
+
+    def new_folder(self):
+        # Simple input dialog needed, using simpledialog or custom
+        # For brevity, using a simple Toplevel or just a fixed name?
+        # Let's use a quick custom dialog since we don't have simpledialog imported
+        # Or just import simpledialog
+        pass # To be implemented or use generic name
+
+    def delete_item(self):
+        sel = self.tree.selection()
+        if not sel: return
+        filename = sel[0]
+        path = self.current_path + "/" + filename
+        if messagebox.askyesno("确认", f"确定删除 {filename} 吗?"):
+            try:
+                try:
+                    self.sftp.remove(path)
+                except:
+                    self.sftp.rmdir(path)
+                self.refresh()
+            except Exception as e:
+                messagebox.showerror("错误", f"删除失败: {str(e)}")
+
+    def rename_item(self):
+        # Needs input dialog
+        pass
+
+    def set_clipboard(self, op):
+        sel = self.tree.selection()
+        if not sel: return
+        self.clipboard = {'path': self.current_path + "/" + sel[0], 'op': op, 'name': sel[0]}
+
+    def paste_file(self):
+        if not self.clipboard: return
+        src = self.clipboard['path']
+        dst = self.current_path + "/" + self.clipboard['name']
+        
+        try:
+            if self.clipboard['op'] == 'copy':
+                # SFTP doesn't have remote copy. We must read and write.
+                # This is slow for large files.
+                with self.sftp.open(src, 'rb') as f_src:
+                    with self.sftp.open(dst, 'wb') as f_dst:
+                        f_dst.write(f_src.read())
+            elif self.clipboard['op'] == 'cut':
+                self.sftp.rename(src, dst)
+            
+            self.refresh()
+            self.clipboard = None
+        except Exception as e:
+            messagebox.showerror("错误", f"粘贴失败: {str(e)}")
+
+class SSHToolbox(tk.Toplevel):
+    def __init__(self, master, theme, client, user, ip, port, password):
+        super().__init__(master)
+        self.title("SSH 工具箱")
+        self.geometry("350x450")
+        self.resizable(False, False)
+        self.theme = theme
+        self.client = client
+        self.user = user
+        self.ip = ip
+        self.port = str(port)
+        self.password = password
+        self.configure(bg=theme["bg"])
+        
+        # Status Section
+        status_frame = ttk.Frame(self)
+        status_frame.pack(fill=tk.X, padx=20, pady=20)
+        
+        self.status_lbl = ttk.Label(status_frame, text=f"🟢 已连接: {ip}", 
+                             font=("Segoe UI", 10, "bold"), foreground="green", background=theme["bg"])
+        self.status_lbl.pack(side=tk.LEFT)
+        
+        cmd_btn = HoverButton(status_frame, text="💻 终端", command=self.open_terminal,
+                            font=("Segoe UI", 9), width=8,
+                            bg=theme["btn_bg"], fg=theme["btn_fg"],
+                            hover_bg=theme["btn_hover"], relief='flat')
+        cmd_btn.pack(side=tk.RIGHT)
         
         # Buttons
         buttons = [
-            ("📁 文件管理", self.show_dev_msg),
-            ("🚀 一键安装 X-UI", self.show_dev_msg),
+            ("📁 文件管理", self.open_file_manager),
+            ("🚀 3x-ui 一键安装", self.install_3x_ui),
             ("📊 服务器状态", self.show_dev_msg),
             ("🐳 Docker 管理", self.show_dev_msg)
         ]
@@ -506,8 +719,66 @@ class SSHToolbox(tk.Toplevel):
                             hover_bg=theme["btn_hover"], relief='flat', height=2)
             btn.pack(fill=tk.X, padx=30, pady=10)
 
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.monitor_connection()
+
+    def monitor_connection(self):
+        if self.client and self.client.get_transport() and self.client.get_transport().is_active():
+             self.status_lbl.config(text=f"🟢 已连接: {self.ip}", foreground="green")
+             self.after(2000, self.monitor_connection)
+        else:
+             self.status_lbl.config(text=f"🔴 已断开: {self.ip}", foreground="red")
+
+    def open_terminal(self):
+        if self.client and self.client.get_transport() and self.client.get_transport().is_active():
+            try:
+                channel = self.client.invoke_shell()
+                TerminalWindow(self.master, self.client, channel, 
+                             title=f"SSH: {self.user}@{self.ip}",
+                             bg_color=self.theme["bg"], fg_color=self.theme["fg"])
+            except Exception as e:
+                messagebox.showerror("错误", f"无法打开终端: {str(e)}")
+        else:
+            messagebox.showerror("错误", "连接已断开")
+
+    def on_close(self):
+        try:
+            self.client.close()
+        except:
+            pass
+        self.destroy()
+
+    def open_terminal(self):
+        # Use terminal.py for the independent SSH command box (Tkinter based)
+        theme_mode = "dark" if self.theme["bg"] == "#202020" else "light"
+        args = [sys.executable, "terminal.py", "-u", self.user, "-h", self.ip, "-p", self.port, "-pwd", self.password, "-t", theme_mode]
+        try:
+            subprocess.Popen(args)
+        except Exception as e:
+            messagebox.showerror("错误", f"无法启动 terminal.py: {str(e)}")
+
+    def open_file_manager(self):
+        if self.client:
+            try:
+                FileManagerWindow(self.master, self.client, self.theme)
+            except Exception as e:
+                messagebox.showerror("错误", f"无法打开文件管理: {str(e)}")
+        else:
+             messagebox.showerror("错误", "未连接")
+
+    def install_3x_ui(self):
+        if messagebox.askyesno("安装确认", "是否安装 3x-ui?"):
+            try:
+                cmd = "bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)"
+                theme_mode = "dark" if self.theme["bg"] == "#202020" else "light"
+                args = [sys.executable, "terminal.py", "-u", self.user, "-h", self.ip, "-p", self.port, "-pwd", self.password, "-t", theme_mode, "-cmd", cmd]
+                subprocess.Popen(args)
+            except Exception as e:
+                messagebox.showerror("错误", f"无法启动安装进程: {str(e)}")
+
     def show_dev_msg(self):
         messagebox.showinfo("提示", "本功能在开发中，请耐心等待")
+
 
 if __name__ == "__main__":
     root = tk.Tk()
