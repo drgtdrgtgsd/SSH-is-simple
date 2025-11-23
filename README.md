@@ -6,7 +6,6 @@
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=for-the-badge&logo=python)
 ![Tkinter](https://img.shields.io/badge/GUI-Tkinter-green?style=for-the-badge)
 ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey?style=for-the-badge&logo=windows)
-![License](https://img.shields.io/badge/License-MIT-orange?style=for-the-badge)
 
 ---
 
@@ -96,5 +95,6 @@ python gui.py
 </div>
 
 ## 📈 趋势图 (Star History)
+
 
 [![Star History Chart](https://api.star-history.com/svg?repos=drgtdrgtgsd/SSH-is-simple&type=Date)](https://star-history.com/#drgtdrgtgsd/SSH-is-simple&Date)
