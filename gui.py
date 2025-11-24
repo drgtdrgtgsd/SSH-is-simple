@@ -718,6 +718,49 @@ class SSHToolbox(tk.Toplevel):
                             bg=theme["btn_bg"], fg=theme["btn_fg"],
                             hover_bg=theme["btn_hover"], relief='flat', height=2)
             btn.pack(fill=tk.X, padx=30, pady=10)
+            
+        # Latency Monitor (Bottom Right)
+        self.latency_frame = tk.Frame(self, bg=theme["bg"])
+        self.latency_frame.pack(side=tk.BOTTOM, anchor=tk.E, padx=10, pady=10)
+        
+        self.latency_label = tk.Label(self.latency_frame, text="延迟: -- ms", bg=theme["bg"], fg=theme["fg"], font=("Segoe UI", 9))
+        self.latency_label.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.test_latency_btn = HoverButton(self.latency_frame, text="测试延迟", command=self.start_latency_test,
+                                          bg=theme["btn_bg"], fg=theme["btn_fg"], hover_bg=theme["btn_hover"],
+                                          font=("Segoe UI", 8), width=8, relief='flat')
+        self.test_latency_btn.pack(side=tk.LEFT)
+
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.monitor_connection()
+        
+        # Auto-ping on start
+        self.after(500, self.start_latency_test)
+
+    def start_latency_test(self):
+        self.latency_label.config(text="正在测试...")
+        self.test_latency_btn.config(state="disabled")
+        threading.Thread(target=self.run_ssh_latency_test, daemon=True).start()
+
+    def run_ssh_latency_test(self):
+        try:
+            if not self.client or not self.client.get_transport() or not self.client.get_transport().is_active():
+                 self.after(0, lambda: self.latency_label.config(text="延迟: 未连接"))
+                 return
+
+            start_time = time.time()
+            # Execute a lightweight command
+            stdin, stdout, stderr = self.client.exec_command('echo 1', timeout=5)
+            stdout.read() # Wait for completion
+            end_time = time.time()
+            
+            latency = int((end_time - start_time) * 1000)
+            self.after(0, lambda: self.latency_label.config(text=f"延迟: {latency} ms"))
+            
+        except Exception as e:
+            self.after(0, lambda: self.latency_label.config(text="延迟: 错误"))
+        finally:
+            self.after(0, lambda: self.test_latency_btn.config(state="normal"))
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.monitor_connection()
