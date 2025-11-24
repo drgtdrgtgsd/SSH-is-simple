@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🚀 SSH Simple
+# 🖥️ SSH Simple
 ### 让 SSH 操作变得 **简单**、**优雅**、**高效**
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=for-the-badge&logo=python)
@@ -130,4 +130,5 @@ python gui.py
 
 
 [![Star History Chart](https://api.star-history.com/svg?repos=drgtdrgtgsd/SSH-is-simple&type=Date)](https://star-history.com/#drgtdrgtgsd/SSH-is-simple&Date)
+
 
