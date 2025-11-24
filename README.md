@@ -128,4 +128,5 @@ python gui.py
 
 ## 📈 趋势图 (Star History)
 
+
 [![Star History Chart](https://api.star-history.com/svg?repos=drgtdrgtgsd/SSH-is-simple&type=Date)](https://star-history.com/#drgtdrgtgsd/SSH-is-simple&Date)
